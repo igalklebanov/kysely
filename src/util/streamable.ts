@@ -1,4 +1,4 @@
-import { ExecuteQueryOptions } from '../query-executor/query-executor'
+import { ExecuteQueryOptions } from '../query-executor/query-executor.js'
 
 export interface Streamable<O> {
   /**
