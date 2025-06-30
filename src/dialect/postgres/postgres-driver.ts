@@ -6,6 +6,9 @@ import { Driver, TransactionSettings } from '../../driver/driver.js'
 import { parseSavepointCommand } from '../../parser/savepoint-parser.js'
 import { CompiledQuery } from '../../query-compiler/compiled-query.js'
 import { QueryCompiler } from '../../query-compiler/query-compiler.js'
+import { ExecuteQueryOptions } from '../../query-executor/query-executor.js'
+import { AbortError, assertNotAborted } from '../../util/abort.js'
+import { Deferred } from '../../util/deferred.js'
 import { isFunction, freeze } from '../../util/object-utils.js'
 import { createQueryId } from '../../util/query-id.js'
 import { extendStackTrace } from '../../util/stack-trace-utils.js'
@@ -16,6 +19,7 @@ import {
   PostgresPoolClient,
 } from './postgres-dialect-config.js'
 
+const PRIVATE_MAKE_CANCELABLE_METHOD = Symbol()
 const PRIVATE_RELEASE_METHOD = Symbol()
 
 export class PostgresDriver implements Driver {
@@ -39,6 +43,7 @@ export class PostgresDriver implements Driver {
 
     if (!connection) {
       connection = new PostgresConnection(client, {
+        acquireConnection: () => this.acquireConnection(),
         cursor: this.#config.cursor ?? null,
       })
       this.#connections.set(client, connection)
@@ -140,24 +145,77 @@ export class PostgresDriver implements Driver {
 }
 
 interface PostgresConnectionOptions {
+  /**
+   * A function that acquires a new connection from the pool.
+   *
+   * The connection will be used to cancel running queries from another process.
+   */
+  acquireConnection: () => Promise<DatabaseConnection>
   cursor: PostgresCursorConstructor | null
 }
 
 class PostgresConnection implements DatabaseConnection {
-  #client: PostgresPoolClient
-  #options: PostgresConnectionOptions
+  readonly #acquireConnection: () => Promise<DatabaseConnection>
+  readonly #client: PostgresPoolClient
+  readonly #options: PostgresConnectionOptions
+  #pid: unknown
 
   constructor(client: PostgresPoolClient, options: PostgresConnectionOptions) {
+    this.#acquireConnection = options.acquireConnection
     this.#client = client
     this.#options = options
   }
 
-  async executeQuery<O>(compiledQuery: CompiledQuery): Promise<QueryResult<O>> {
+  async cancelQuery(): Promise<void> {}
+
+  async executeQuery<O>(
+    compiledQuery: CompiledQuery,
+    options?: ExecuteQueryOptions,
+  ): Promise<QueryResult<O>> {
+    const { abortSignal } = options || {}
+
+    assertNotAborted(abortSignal)
+
     try {
-      const { command, rowCount, rows } = await this.#client.query<O>(
-        compiledQuery.sql,
-        [...compiledQuery.parameters],
-      )
+      const { promise: abortPromise, resolve } = new Deferred<void>()
+
+      if (abortSignal) {
+        await this[PRIVATE_MAKE_CANCELABLE_METHOD]()
+
+        assertNotAborted(abortSignal)
+
+        abortSignal.addEventListener('abort', () => {
+          resolve()
+        })
+      }
+
+      const queryPromise = this.#client.query<O>(compiledQuery.sql, [
+        ...compiledQuery.parameters,
+      ])
+
+      const result = await Promise.race([abortPromise, queryPromise])
+
+      if (!result) {
+        // we fire the database-side cancel command and forget.
+        void this.#acquireConnection().then((controlConnection) =>
+          controlConnection
+            .executeQuery(
+              CompiledQuery.raw(`select pg_cancel_backend($1)`, [this.#pid]),
+            )
+            .catch(() => {
+              // noop
+            })
+            .finally(() => {
+              ;(controlConnection as PostgresConnection)[
+                PRIVATE_RELEASE_METHOD
+              ]()
+            }),
+        )
+
+        throw new AbortError()
+      }
+
+      const { command, rowCount, rows } = result
 
       return {
         numAffectedRows:
@@ -170,6 +228,10 @@ class PostgresConnection implements DatabaseConnection {
         rows: rows ?? [],
       }
     } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw err
+      }
+
       throw extendStackTrace(err, new Error())
     }
   }
@@ -210,6 +272,21 @@ class PostgresConnection implements DatabaseConnection {
     } finally {
       await cursor.close()
     }
+  }
+
+  async [PRIVATE_MAKE_CANCELABLE_METHOD](): Promise<void> {
+    if (this.#pid) {
+      return
+    }
+
+    const {
+      rows: [row],
+    } = await this.#client.query<{ pid: unknown }>(
+      'select pg_backend_pid() as pid',
+      [],
+    )
+
+    this.#pid = row.pid
   }
 
   [PRIVATE_RELEASE_METHOD](): void {
