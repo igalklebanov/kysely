@@ -9,6 +9,7 @@ import { QueryCompiler } from '../../query-compiler/query-compiler.js'
 import { ExecuteQueryOptions } from '../../query-executor/query-executor.js'
 import { AbortError, assertNotAborted } from '../../util/abort.js'
 import { Deferred } from '../../util/deferred.js'
+import { logOnce } from '../../util/log-once.js'
 import { isFunction, freeze } from '../../util/object-utils.js'
 import { createQueryId } from '../../util/query-id.js'
 import { extendStackTrace } from '../../util/stack-trace-utils.js'
@@ -19,6 +20,7 @@ import {
   PostgresPoolClient,
 } from './postgres-dialect-config.js'
 
+const PRIVATE_CANCEL_QUERY_METHOD = Symbol()
 const PRIVATE_MAKE_CANCELABLE_METHOD = Symbol()
 const PRIVATE_RELEASE_METHOD = Symbol()
 
@@ -166,8 +168,6 @@ class PostgresConnection implements DatabaseConnection {
     this.#options = options
   }
 
-  async cancelQuery(): Promise<void> {}
-
   async executeQuery<O>(
     compiledQuery: CompiledQuery,
     options?: ExecuteQueryOptions,
@@ -197,20 +197,7 @@ class PostgresConnection implements DatabaseConnection {
 
       if (!result) {
         // we fire the database-side cancel command and forget.
-        void this.#acquireConnection().then((controlConnection) =>
-          controlConnection
-            .executeQuery(
-              CompiledQuery.raw(`select pg_cancel_backend($1)`, [this.#pid]),
-            )
-            .catch(() => {
-              // noop
-            })
-            .finally(() => {
-              ;(controlConnection as PostgresConnection)[
-                PRIVATE_RELEASE_METHOD
-              ]()
-            }),
-        )
+        void this[PRIVATE_CANCEL_QUERY_METHOD]()
 
         throw new AbortError()
       }
@@ -271,6 +258,26 @@ class PostgresConnection implements DatabaseConnection {
       }
     } finally {
       await cursor.close()
+    }
+  }
+
+  async [PRIVATE_CANCEL_QUERY_METHOD](): Promise<void> {
+    if (!this.#pid) {
+      return logOnce(
+        'kysely:warning: cannot cancel query because the connection has not been made cancelable.',
+      )
+    }
+
+    const controlConnection = await this.#acquireConnection()
+
+    try {
+      await controlConnection.executeQuery(
+        CompiledQuery.raw(`select pg_cancel_backend($1)`, [this.#pid]),
+      )
+    } catch {
+      // noop
+    } finally {
+      ;(controlConnection as PostgresConnection)[PRIVATE_RELEASE_METHOD]()
     }
   }
 
