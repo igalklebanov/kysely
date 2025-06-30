@@ -241,6 +241,7 @@ export {
 export * from './util/infer-result.js'
 export { logOnce } from './util/log-once.js'
 export { createQueryId, QueryId } from './util/query-id.js'
+export * from './util/abort.js'
 
 export {
   SelectExpression,
