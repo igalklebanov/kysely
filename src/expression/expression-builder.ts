@@ -602,12 +602,10 @@ export interface ExpressionBuilder<DB, TB extends keyof DB> {
    * ### Example
    *
    * ```ts
-   * import { GeneratedAlways, Json } from 'kysely'
+   * import { Json } from 'kysely'
    *
    * interface Database {
-   *   person: {
-   *     id: GeneratedAlways<number>
-   *     name: string
+   *   person_metadata: {
    *     experience: Json<{ title: string; company: string }[]>
    *     preferences: Json<{ locale: string; timezone: string }>
    *     profile: Json<{ email_verified: boolean }>
@@ -615,12 +613,12 @@ export interface ExpressionBuilder<DB, TB extends keyof DB> {
    * }
    *
    * const result = await db
-   *   .insertInto('person')
+   *   .insertInto('person_metadata')
    *   .values(({ jval }) => ({
-   *     name: 'Jennifer Aniston',
+   *     personId: 123,
    *     experience: jval([{ title: 'Software Engineer', company: 'Google' }]), // ✔️
-   *     preferences: jval({ locale: 'en' }), // ❌ missing `timezone`
-   *     profile: JSON.stringify({ email_verified: true }), // ❌ doesn't match `Serialized<{ email_verified }>`
+   *     // preferences: jval({ locale: 'en' }), // ❌ missing `timezone`
+   *     // profile: JSON.stringify({ email_verified: true }), // ❌ doesn't match `Serialized<{ email_verified }>`
    *   }))
    *   .execute()
    * ```

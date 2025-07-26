@@ -142,7 +142,12 @@ export interface Sql {
    * `sql.jval(value)` is a shortcut for:
    *
    * ```ts
-   * sql<Serialized<ValueType>>`${serializerFn(obj)}`
+   * import { Serialized, sql } from 'kysely'
+   *
+   * const serializerFn = JSON.stringify
+   * const obj = { hello: 'world!' }
+   *
+   * sql<Serialized<typeof obj>>`${serializerFn(obj)}`
    * ```
    *
    * Default serializer function is `JSON.stringify`.
